@@ -90,4 +90,4 @@ Copyright (C) 2026 yutoo77。本リポジトリの自作物は、別記のない
 
 PDF処理に利用する [PyMuPDF](https://pymupdf.io/licensing) はAGPLv3または商用ライセンスで提供されています。PyMuPDFを含む依存ライブラリの著作権・ライセンス表示はそれぞれの条件に従い尊重してください。本リポジトリに依存ライブラリやモデル重みは同梱しません。
 
-公開用候補の監査範囲は[公開前監査](docs/portfolio/PUBLIC_AUDIT.md)に記録しています。GitHubでのPublic化は利用者の最終確認後に行います。
+公開前に実施した監査の範囲と結果は[公開前監査](docs/portfolio/PUBLIC_AUDIT.md)に記録しています。
