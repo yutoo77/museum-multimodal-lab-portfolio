@@ -1,0 +1,39 @@
+{
+  "name": "museum-multimodal-lab-frontend",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src",
+    "smoke:ui": "node scripts/smoke.mjs",
+    "visual:ui": "node scripts/visual-check.mjs",
+    "flow:ui": "node scripts/phase2-flow.mjs",
+    "state:ui": "node scripts/ui-state-check.mjs",
+    "polish:ui": "node scripts/micro-polish-check.mjs",
+    "preview:ui": "node scripts/preview-zoom-check.mjs"
+  },
+  "dependencies": {
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@types/node": "^24.19.2",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.2.1",
+    "eslint": "10.14.0",
+    "globals": "17.14.0",
+    "playwright-core": "1.65.0",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.72.1",
+    "vite": "8.3.6"
+  },
+  "overrides": {
+    "minimatch": "11.0.5"
+  }
+}
