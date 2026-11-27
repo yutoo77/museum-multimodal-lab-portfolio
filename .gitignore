@@ -7,12 +7,16 @@ frontend/node_modules/
 frontend/dist/
 data/
 outputs/
+models/
 *.log
 .env
 .env.*
 !.env.example
 *.sqlite3
 *.db
+*.onnx
+*.safetensors
+*.gguf
 *.wav
 *.mp3
 *.m4a

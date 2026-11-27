@@ -16,6 +16,7 @@ const baseUrl = process.env.MML_FRONTEND_URL;
 if (process.env.MML_E2E_ALLOW_WRITE !== "1" || !baseUrl || !/^http:\/\/127\.0\.0\.1:5175\/?$/.test(baseUrl)) {
   throw new Error("UI書き込みテストは独立した 127.0.0.1:5175 でのみ実行できます。MML_E2E_ALLOW_WRITE=1 と MML_FRONTEND_URL を設定してください。");
 }
+const expectedAnswerModel = process.env.MML_E2E_EXPECT_ANSWER_MODEL ?? "qwen3:4b-instruct-2507-q4_K_M";
 
 const edgeCandidates = [
   process.env.EDGE_PATH,
@@ -151,6 +152,7 @@ const extract = async (item) => {
 const approve = async (item) => {
   const editor = page.getByRole("textbox", { name: "確認・修正するテキスト" }).first();
   const raw = await editor.inputValue();
+  if (item.format === "image") await screenshot("image-review-raw-1280.png");
   await editor.fill(item.corrected);
   const [saved] = await Promise.all([
     page.waitForResponse((response) => response.request().method() === "PATCH" && /\/api\/extracted-units\//.test(new URL(response.url()).pathname)),
@@ -158,6 +160,7 @@ const approve = async (item) => {
   ]);
   assert.equal(saved.status(), 200, `${item.format} correction not saved`);
   await page.getByText("修正を保存しました。知識への登録はまだ行われていません。").waitFor();
+  if (item.format === "image") await screenshot("image-review-corrected-1280.png");
   await page.getByLabel("元資料と抽出内容を確認しました").check();
   const [response] = await Promise.all([
     page.waitForResponse((response) => response.request().method() === "POST" && /\/approve$/.test(new URL(response.url()).pathname)),
@@ -172,12 +175,21 @@ const approve = async (item) => {
 const ask = async (item, documentId) => {
   await nav("質問する").click();
   await page.getByRole("textbox", { name: "質問" }).fill(item.question);
+  if (item.format === "image") {
+    const methods = page.locator(".retrieval-options");
+    assert.equal(await methods.evaluate((details) => details.open), false);
+    await methods.locator("summary").click();
+    assert.equal(await page.getByLabel("資料の探し方").inputValue(), "bm25");
+    await screenshot("retrieval-settings-1280.png");
+    await methods.locator("summary").click();
+  }
   const started = Date.now();
   const [response] = await Promise.all([
     page.waitForResponse((response) => response.request().method() === "POST" && new URL(response.url()).pathname === "/api/ask", { timeout: 120000 }),
     page.getByRole("button", { name: "資料から調べる" }).click(),
   ]);
   assert.equal(response.status(), 200, `${item.format} ask returned HTTP ${response.status()}`);
+  assert.equal(response.request().postDataJSON().retrieval_mode, "bm25");
   const data = await response.json();
   assert.equal(data.status, "answered", `${item.format} question was held: ${data.answer}`);
   assert.match(data.answer, item.expected, `${item.format} answer did not contain expected fictional value`);
@@ -199,6 +211,15 @@ const ask = async (item, documentId) => {
 try {
   const response = await page.goto(baseUrl, { waitUntil: "networkidle", timeout: 30000 });
   assert.equal(response?.status(), 200);
+  const healthResponse = await page.request.get(new URL("/api/health", baseUrl).toString());
+  assert.equal(healthResponse.status(), 200);
+  const health = await healthResponse.json();
+  assert.equal(health.documents_count, 0, "Start with an empty isolated DB");
+  assert.equal(health.ollama.available, true);
+  assert.equal(health.models.answer, expectedAnswerModel);
+  result.answerModel = health.models.answer;
+  result.retrievalMode = "bm25";
+  result.availableModes = health.retrieval_modes;
   await page.getByRole("heading", { name: "資料を取り込む" }).waitFor();
   await screenshot("00-import-empty-1280.png");
 
@@ -246,6 +267,12 @@ try {
     await screenshot(`${tab}-1024.png`);
   }
   result.checks.push("1280×800 と 1024×768 の主要画面・横スクロールなし");
+  const outside = await page.request.post(new URL("/api/ask", baseUrl).toString(), {
+    data: { question: "資料にない PX-0000000 の観測時刻は？" },
+  });
+  assert.equal(outside.status(), 200);
+  assert.equal((await outside.json()).status, "held");
+  result.checks.push("検索方式を省略したAPIリクエストで資料外の質問を保留");
   assert.deepEqual(pageErrors, [], `Browser runtime errors: ${pageErrors.join(" / ")}`);
   await writeFile(path.join(output, "result.json"), JSON.stringify(result, null, 2), "utf8");
   console.log(JSON.stringify(result, null, 2));

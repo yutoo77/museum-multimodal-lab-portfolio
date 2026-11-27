@@ -14,13 +14,16 @@ QUESTION_NOISE = {"について", "教えて", "ください", "ですか", "何
 PDF_CHUNK_CHARS = 1000
 AUDIO_CHUNK_CHARS = 1600
 CHUNK_OVERLAP_CHARS = 120
-CLARIFICATION_MIN_LEXICAL = 0.5
+CLARIFICATION_MIN_LEXICAL = 0.25
 CLARIFICATION_RELATIVE_LEXICAL = 0.8
 COMPARISON_WORDS = ("比較", "違い", "それぞれ", "各資料", "両方", "双方", "共通点", "合計")
+HYPHEN_VARIANTS = str.maketrans({character: "-" for character in "‐‑‒–—−﹣"})
 
 
 def normalize(text: str) -> str:
-    return unicodedata.normalize("NFKC", text).lower()
+    # PDF fonts can extract a visually ordinary identifier hyphen as U+2012
+    # (figure dash). Treat typographic dashes as the same identifier separator.
+    return unicodedata.normalize("NFKC", text).translate(HYPHEN_VARIANTS).lower()
 
 
 def terms(text: str) -> Counter[str]:

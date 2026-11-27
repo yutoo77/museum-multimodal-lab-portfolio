@@ -54,6 +54,19 @@ def test_comparison_question_is_not_clarified(service: LabService, fake_models: 
     assert {item["name"] for item in fake_models.answer_calls[0][1]} == {"比較A.png", "比較B.png"}
 
 
+def test_short_shared_topic_with_distinct_identifiers_asks_which_document(
+    service: LabService, fake_models: FakeModels
+) -> None:
+    register_image(service, "水槽A.png", "架空展示ルミナ水槽。識別番号 LM-482。水温は17℃です。")
+    register_image(service, "水槽B.png", "架空展示ニナミ水槽。識別番号 LM-483。水温は22℃です。")
+
+    result = service.ask("水槽の水温を教えて", "bm25")
+
+    assert result["status"] == "needs_clarification"
+    assert len(result["sources"]) == 2
+    assert fake_models.answer_calls == []
+
+
 def test_same_exhibit_identifier_in_two_documents_does_not_overclarify(
     service: LabService, fake_models: FakeModels
 ) -> None:

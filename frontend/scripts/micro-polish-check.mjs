@@ -40,6 +40,9 @@ const doc = {
     page_number: null, start_sec: null, end_sec: null, model_name: "synthetic-model",
   }],
 };
+const otherDoc = { ...doc, id: "synthetic-micro-other", name: "架空の別展示.png" };
+const replacement = { ...doc, id: "synthetic-micro-replacement", version: 2, status: "draft", units: [] };
+let replacementUploaded = false;
 const png = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL/nwAAAABJRU5ErkJggg==",
   "base64",
@@ -59,6 +62,7 @@ const context = await browser.newContext({ viewport: { width: 1280, height: 800 
 const page = await context.newPage();
 const errors = [];
 const requests = [];
+const askBodies = [];
 const captures = [];
 page.on("pageerror", (error) => errors.push(error.message));
 let releaseSlowAnswer;
@@ -83,13 +87,25 @@ await page.route("**/api/**", async (route) => {
     models: { answer: "synthetic", embedding: "synthetic", vision: "synthetic", asr: "synthetic" },
     documents_count: 1, stale_index_count: 0,
   });
-  if (path === "/api/documents" && method === "GET") return reply(route, { documents: [doc] });
+  if (path === "/api/documents" && method === "GET") return reply(route, {
+    documents: replacementUploaded ? [replacement, otherDoc, { ...doc, status: "superseded" }] : [doc, otherDoc],
+  });
+  if (path === "/api/documents" && method === "POST") {
+    replacementUploaded = true;
+    return reply(route, replacement, 201);
+  }
+  if (path === `/api/documents/${replacement.id}` && method === "GET") return reply(route, replacement);
   if (path === `/api/documents/${doc.id}` && method === "GET") return reply(route, doc);
   if (path === `/api/documents/${doc.id}/original` && method === "GET") {
     return route.fulfill({ status: 200, contentType: "image/png", body: png });
   }
   if (path === "/api/ask" && method === "POST") {
-    const question = JSON.parse(request.postData()).question;
+    const body = JSON.parse(request.postData());
+    askBodies.push(body);
+    const question = body.question;
+    if (body.retrieval_mode === "dense" || body.retrieval_mode === "hybrid") {
+      return reply(route, { detail: "ローカルQdrantに接続できません。起動状態を確認してください。" }, 503);
+    }
     if (question === "遅い回答を調べる") {
       await new Promise((resolve) => {
         releaseSlowAnswer = resolve;
@@ -113,7 +129,7 @@ const question = page.getByRole("textbox", { name: "質問" });
 const ask = () => page.getByRole("button", { name: "資料から調べる" }).click();
 const waitAnswer = () => page.locator(".answer-section").waitFor({ state: "visible" });
 const noAnswer = async () => {
-  assert.equal(await page.locator(".answer-section").count(), 0, "Old answer must be removed after question edit");
+  assert.equal(await page.locator(".answer-section").count(), 0, "Old answer must be removed");
 };
 
 try {
@@ -186,11 +202,47 @@ try {
   await question.fill("短い根拠を調べる");
   await noAnswer();
 
+  await ask();
+  await waitAnswer();
+  assert.ok(askBodies.every((body) => body.retrieval_mode === "bm25"), "Unchanged UI should use BM25 retrieval");
+  await page.getByText("検索方法", { exact: true }).click();
+  await page.locator("#retrieval-mode").selectOption("hybrid");
+  await noAnswer();
+  assert.equal(await question.inputValue(), "短い根拠を調べる", "Mode change must preserve question text");
+  await ask();
+  await page.getByRole("alert").getByText("ローカルQdrantに接続できません。起動状態を確認してください。").waitFor();
+  assert.equal(askBodies.at(-1).retrieval_mode, "hybrid", "Selected retrieval mode must be posted to the API");
+  await page.locator("#retrieval-mode").selectOption("bm25");
+  assert.equal(await page.getByRole("alert").count(), 0, "Changing modes should clear an old request error");
+  await ask();
+  await waitAnswer();
+  assert.equal(askBodies.at(-1).retrieval_mode, "bm25");
+  await page.locator("#retrieval-mode").selectOption("dense");
+  await noAnswer();
+  await ask();
+  await page.getByRole("alert").getByText("ローカルQdrantに接続できません。起動状態を確認してください。").waitFor();
+  assert.equal(askBodies.at(-1).retrieval_mode, "dense");
+
+  await page.locator("#retrieval-mode").selectOption("bm25");
+  await ask();
+  await waitAnswer();
+  await page.getByRole("button", { name: "資料を取り込む" }).click();
+  const fileInput = page.locator('.dropzone input[type="file"]');
+  if (!await fileInput.count()) await page.getByRole("button", { name: "別の資料を追加" }).click();
+  await fileInput.setInputFiles({ name: doc.name, mimeType: "image/png", buffer: png });
+  await page.getByRole("button", { name: "資料を追加", exact: true }).click();
+  await page.getByRole("heading", { name: "資料を読み取る" }).waitFor();
+  await page.getByRole("button", { name: "質問する" }).click();
+  await question.waitFor();
+  await noAnswer();
+
   assert.deepEqual(errors, [], `Browser runtime errors: ${errors.join(" | ")}`);
   console.log(JSON.stringify({
     kind: "FAKE_API_MICRO_POLISH", result: "PASS",
     checks: ["answer_clear_on_edit", "held_clear_on_edit", "short_source", "long_source_keyboard_disclosure",
-      "source_comparison_return", "inflight_edit_and_double_submit_blocked"],
+      "source_comparison_return", "inflight_edit_and_double_submit_blocked",
+      "retrieval_mode_payload", "mode_change_clears_answer_and_error", "qdrant_unavailable_message",
+      "superseding_upload_clears_stale_answer"],
     ...(captures.length ? { screenshots: captures } : {}),
   }, null, 2));
 } finally {

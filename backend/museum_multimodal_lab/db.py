@@ -67,6 +67,12 @@ CREATE TABLE IF NOT EXISTS chunks (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_chunks_document ON chunks(document_id);
+CREATE TABLE IF NOT EXISTS visual_pages (
+  chunk_id TEXT PRIMARY KEY REFERENCES chunks(id) ON DELETE CASCADE,
+  model TEXT NOT NULL,
+  embedding_dim INTEGER NOT NULL,
+  embedding_json TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS jobs (
   id TEXT PRIMARY KEY,
   document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,

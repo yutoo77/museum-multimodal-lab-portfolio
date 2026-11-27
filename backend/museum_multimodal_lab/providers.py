@@ -12,7 +12,7 @@ from typing import Any, Protocol
 
 import httpx
 
-from .config import Settings
+from .config import Settings, cloud_model_name
 
 
 class ModelError(RuntimeError):
@@ -57,28 +57,39 @@ class OllamaProvider:
             # Never copy the server response or user content into a UI/log error.
             raise ModelError("ローカルAIへ接続できないか、応答を読めません") from exc
 
-    def models(self) -> list[str]:
-        body = self._request("GET", "/api/tags")
+    def models(self, timeout: float | None = None) -> list[str]:
+        options = {"timeout": timeout} if timeout is not None else {}
+        body = self._request("GET", "/api/tags", **options)
         items = body.get("models")
         if not isinstance(items, list):
             raise ModelError("ローカルAIのモデル一覧を確認できません")
-        return [item["name"] for item in items if isinstance(item, dict) and isinstance(item.get("name"), str) and item["name"]]
+        return [
+            item["name"] for item in items if isinstance(item, dict)
+            and isinstance(item.get("name"), str) and item["name"] and not cloud_model_name(item["name"])
+            and not (item.get("remote_model") or item.get("remote_host"))
+        ]
 
     def supports_vision(self) -> bool:
         body = self._request("POST", "/api/show", json={"model": self.settings.vision_model})
+        if body.get("remote_model") or body.get("remote_host"):
+            raise ModelError("遠隔の画像モデルは利用できません")
         capabilities = body.get("capabilities")
         if not isinstance(capabilities, list):
             raise ModelError("画像モデルの対応形式を確認できません")
         return "vision" in capabilities
 
-    def _require_model(self, name: str) -> None:
-        installed = self.models()
+    def _require_model(self, name: str, request_timeout: float | None = None) -> None:
+        installed = self.models(request_timeout)
         if name not in installed and not (name.endswith(":latest") and name[:-7] in installed):
             raise ModelError(f"必要なローカルモデルがありません: {name}")
 
     def embed(self, text: str) -> list[float]:
-        self._require_model(self.settings.embedding_model)
-        body = self._request("POST", "/api/embed", json={"model": self.settings.embedding_model, "input": text, "keep_alive": 0})
+        return self.embed_bounded(text)
+
+    def embed_bounded(self, text: str, timeout: float | None = None) -> list[float]:
+        self._require_model(self.settings.embedding_model, min(3.0, timeout / 4) if timeout is not None else None)
+        options = {"timeout": timeout * 0.75} if timeout is not None else {}
+        body = self._request("POST", "/api/embed", json={"model": self.settings.embedding_model, "input": text, "keep_alive": 0}, **options)
         embeddings = body.get("embeddings")
         if not isinstance(embeddings, list) or not embeddings or not isinstance(embeddings[0], list):
             raise ModelError("埋め込みを取得できませんでした")
@@ -119,7 +130,11 @@ class OllamaProvider:
         return result
 
     def answer(self, question: str, evidence: list[dict[str, str]]) -> dict[str, Any]:
-        self._require_model(self.settings.answer_model)
+        return self.answer_bounded(question, evidence)
+
+    def answer_bounded(self, question: str, evidence: list[dict[str, str]], timeout: float | None = None) -> dict[str, Any]:
+        self._require_model(self.settings.answer_model, min(3.0, timeout / 4) if timeout is not None else None)
+        options = {"timeout": timeout * 0.75} if timeout is not None else {}
         snippets = "\n".join(f"[{item['id']}] {item['name']} ({item['kind']}): {item['text']}" for item in evidence)
         prompt = (
             "あなたは科学館職員が確認する説明案を作成します。以下の確認済み資料だけを根拠に、"
@@ -137,9 +152,11 @@ class OllamaProvider:
                 "prompt": prompt,
                 "format": "json",
                 "stream": False,
+                "think": False,
                 "keep_alive": 0,
                 "options": {"temperature": 0, "num_predict": 300},
             },
+            **options,
         )
         raw_response = body.get("response")
         if not isinstance(raw_response, str):
@@ -151,6 +168,21 @@ class OllamaProvider:
         if not isinstance(parsed, dict) or not isinstance(parsed.get("answer"), str) or not isinstance(parsed.get("source_ids"), list):
             raise ModelError("回答の形式を確認できませんでした")
         return parsed
+
+    def plan_retrieval(self, prompt: str, timeout: float) -> str:
+        self._require_model(self.settings.answer_model, min(3.0, timeout / 4))
+        body = self._request(
+            "POST", "/api/generate", timeout=timeout * 0.75,
+            json={
+                "model": self.settings.answer_model, "prompt": prompt,
+                "format": "json", "think": False, "stream": False, "keep_alive": 0,
+                "options": {"temperature": 0, "num_predict": 110, "num_ctx": 4096},
+            },
+        )
+        result = body.get("response")
+        if not isinstance(result, str):
+            raise ModelError("検索方法の応答形式が不正です")
+        return result
 
 
 class FasterWhisperProvider:

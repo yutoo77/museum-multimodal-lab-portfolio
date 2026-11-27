@@ -1,7 +1,6 @@
 {
   "name": "museum-multimodal-lab-frontend",
   "private": true,
-  "license": "AGPL-3.0-only",
   "version": "0.1.0",
   "type": "module",
   "scripts": {
@@ -14,6 +13,7 @@
     "flow:ui": "node scripts/phase2-flow.mjs",
     "state:ui": "node scripts/ui-state-check.mjs",
     "polish:ui": "node scripts/micro-polish-check.mjs",
+    "expanded:ui": "node scripts/expanded-retrieval-check.mjs",
     "preview:ui": "node scripts/preview-zoom-check.mjs"
   },
   "dependencies": {

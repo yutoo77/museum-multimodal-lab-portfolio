@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import threading
 from contextlib import asynccontextmanager
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import FastAPI, File, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.types import Receive, Scope, Send
 
+from .advanced_retrieval import DEFAULT_RETRIEVAL_MODE
 from .config import Settings
 from .extraction import ExtractionError
 from .providers import (
@@ -24,6 +25,7 @@ from .providers import (
     OllamaProvider,
 )
 from .service import ConflictError, LabService, NotFoundError
+from .visual_retrieval import VisualEncoder
 
 
 class UnitPatch(BaseModel):
@@ -32,18 +34,20 @@ class UnitPatch(BaseModel):
 
 class AskRequest(BaseModel):
     question: str = Field(min_length=1, max_length=1500)
+    retrieval_mode: Literal["legacy", "bm25", "dense", "hybrid", "visual", "multimodal", "agentic"] = DEFAULT_RETRIEVAL_MODE
 
 
 def create_app(
     settings: Settings | None = None,
     models: ModelProvider | None = None,
     asr: AsrProvider | None = None,
+    visual: VisualEncoder | None = None,
 ) -> FastAPI:
     test_client = settings is not None and models is not None and asr is not None
     settings = settings or Settings.from_env()
     models = models or OllamaProvider(settings)
     asr = asr or FasterWhisperProvider(settings)
-    service = LabService(settings, models, asr)
+    service = LabService(settings, models, asr, visual=visual)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -152,7 +156,7 @@ def create_app(
 
     @app.post("/api/ask")
     def ask(body: AskRequest):
-        return service.ask(body.question)
+        return service.ask(body.question, body.retrieval_mode)
 
     return app
 

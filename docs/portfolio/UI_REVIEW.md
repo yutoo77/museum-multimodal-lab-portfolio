@@ -1,5 +1,11 @@
 # UIの仕上げと画面記録
 
+## 現在の公開版（2026-11-27）
+
+3画面を維持し、「検索方法」は初期状態で閉じています。展開したときだけ既定のBM25や他の利用可能な方式を選べます。新しい [取り込み](screenshots/release-import.png)、[原本との照合・修正](screenshots/release-review-local.png)、[検索方法](screenshots/release-retrieval-settings.png)、[既定構成の回答](screenshots/release-answer-4b.png)、[出典比較](screenshots/release-source-comparison.png) は公開版の実Edge・FastAPI・ローカルモデルを使った画面です。画像と質問は架空資料だけで、以下の旧版の撮影記録とは区別します。
+
+## 旧版での考え方・記録
+
 このアプリは科学館職員との相談に使う、単一PC向けの研究用デモです。画面の役割を「資料を取り込む」「保存した資料」「質問する」に絞り、原本との照合と回答の根拠を主操作にしました。巨大なダッシュボードやチャット風の演出ではなく、今の作業・次の操作・資料と出典の対応を先に見せています。
 
 ## 変更前に確認したこと
@@ -17,7 +23,7 @@
 - 通常の画面では状態と次の操作を優先し、注意点や処理方式の説明は「使い方」へ分ける。詳細は必要なときに開けるようにする。
 - アイコンだけの補助ボタンには日本語の名前とホバー・キーボードフォーカス時の説明を付ける。装飾のためのアイコンは増やさない。
 
-参考にしたのは画面素材ではなく、[Linearの主作業を中心にするナビゲーション](https://linear.app/now/behind-the-latest-design-refresh)、[Notionのワークスペースと補助操作の分離](https://www.notion.com/help/intro-to-workspaces)、[ChatGPT Searchの回答と出典の関係](https://help.openai.com/en/articles/9237897-searching-the-web-with-chatgpt)、[Perplexityの根拠へ進む操作](https://www.perplexity.ai/en-GB/hub/blog/getting-started-with-perplexity)です。アイコンの説明は [WAI-ARIA Tooltip Pattern](https://www.w3.org/WAI/ARIA/apg/patterns/tooltip/) を参考にし、外部サービスの素材や画面をコピーしていません。
+参考にしたのは画面素材ではなく、[Linearの主作業を中心にするナビゲーション](https://linear.app/now/behind-the-latest-design-refresh)、[Notionのワークスペースと補助操作の分離](https://www.notion.com/help/intro-to-workspaces)、[ChatGPT Searchの回答と出典の関係](https://help.openai.com/en/articles/9237897-searching-the-web-with-chatgpt)、Perplexityの根拠へ進む操作です。アイコンの説明は [WAI-ARIA Tooltip Pattern](https://www.w3.org/WAI/ARIA/apg/patterns/tooltip/) を参考にし、外部サービスの素材や画面をコピーしていません。
 
 ## 変更後の画面と検証範囲
 

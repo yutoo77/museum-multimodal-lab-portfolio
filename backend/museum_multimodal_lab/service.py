@@ -9,17 +9,35 @@ import math
 import re
 import sqlite3
 import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
+from .advanced_retrieval import DEFAULT_RETRIEVAL_MODE, RETRIEVAL_MODES, rank_text_modes
+from .agentic import run_agentic
 from .config import Settings
 from .db import Database
 from .extraction import ExtractionError, extract_document, validate_upload
 from .providers import AsrProvider, ModelError, ModelProvider
-from .retrieval import chunk_text, clarification_candidates, rank_chunks
+from .retrieval import (
+    chunk_text,
+    clarification_candidates,
+    lexical_score,
+    normalize,
+    rank_chunks,
+    terms,
+)
+from .visual_retrieval import (
+    VisualEncoder,
+    fuse_pages,
+    read_visual_page,
+    visual_pages,
+    visual_rank,
+)
 
 
 class NotFoundError(ValueError):
@@ -38,6 +56,27 @@ def _uuid() -> str:
     return str(uuid.uuid4())
 
 
+def _numeric_tokens(text: str) -> set[str]:
+    # Require complete numbers; '42' must not be validated by '142' or '-42'.
+    return set(re.findall(r"[+-]?\d+(?:[.,]\d+)*", normalize(text)))
+
+
+_COLOR_REQUEST = re.compile(r"何色|なにいろ|どんな色|どの色|色(?:は(?:何|なに|どれ|[？?]|$)|を(?:教え|示し|確認|答え))")
+_COLOR_TOKEN = re.compile(
+    r"青緑|黄緑|水色|紺色|群青|藍色|灰色|銀色|金色|桃色|橙色|無色|透明|"
+    r"ブルー|レッド|グリーン|イエロー|ホワイト|ブラック|ピンク|オレンジ|"
+    r"[赤青緑黄白黒紫茶](?=色|い|線|の|で|だ|と|に|が|は|、|。|\s|$)"
+)
+_COLOR_ALIAS = {
+    "ブルー": "青", "レッド": "赤", "グリーン": "緑", "イエロー": "黄",
+    "ホワイト": "白", "ブラック": "黒", "ピンク": "桃色", "オレンジ": "橙色",
+}
+
+
+def _color_tokens(text: str) -> set[str]:
+    return {_COLOR_ALIAS.get(token, token) for token in _COLOR_TOKEN.findall(normalize(text))}
+
+
 def _source_card(row: dict[str, Any], snippet: str) -> dict[str, Any]:
     fragment = (
         f"#page={row['page_number']}" if row["page_number"] else
@@ -53,12 +92,13 @@ def _source_card(row: dict[str, Any], snippet: str) -> dict[str, Any]:
         "start_sec": row["start_sec"],
         "end_sec": row["end_sec"],
         "snippet": snippet,
+        **({"retrieval_origin": row["retrieval_origin"]} if "retrieval_origin" in row else {}),
         "original_url": f"/api/documents/{row['document_id']}/original{fragment}",
     }
 
 
 class LabService:
-    def __init__(self, settings: Settings, models: ModelProvider, asr: AsrProvider):
+    def __init__(self, settings: Settings, models: ModelProvider, asr: AsrProvider, visual: VisualEncoder | None = None):
         self.settings = settings
         self.models = models
         self.asr = asr
@@ -68,9 +108,32 @@ class LabService:
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mml-job")
         self._submit_lock = threading.Lock()
         self._model_lock = threading.Lock()
+        self._qdrant = None
+        self.visual = visual
+        self.visual_setup_failed = False
+        if self.visual is None and settings.visual_model_dir is not None:
+            try:
+                from .visual_model import LocalVisualModel
+
+                self.visual = LocalVisualModel(settings.visual_model_dir)
+            except Exception:  # noqa: BLE001 - optional third-party runtime boundary
+                # A missing model/incompatible runtime does not disable text retrieval.
+                self.visual_setup_failed = True
 
     def close(self) -> None:
         self.executor.shutdown(wait=False, cancel_futures=False)
+        if self._qdrant is not None:
+            self._qdrant.close()
+
+    def _local_vector_index(self):
+        if self._qdrant is None:
+            try:
+                from .qdrant_index import QdrantIndex
+
+                self._qdrant = QdrantIndex(self.settings.data_dir)
+            except Exception as exc:
+                raise ModelError("ローカルQdrantを開けません。索引の保存先と依存関係を確認してください") from exc
+        return self._qdrant
 
     def health(self) -> dict[str, Any]:
         try:
@@ -80,6 +143,22 @@ class LabService:
             installed, available = [], False
         with self.db.connect() as connection:
             count = connection.execute("SELECT count(*) FROM documents WHERE status != 'superseded'").fetchone()[0]
+            visual_pending = self.visual is not None and connection.execute(
+                "SELECT 1 FROM chunks c JOIN documents d ON c.document_id=d.id "
+                "JOIN extracted_units u ON c.unit_id=u.id LEFT JOIN visual_pages v ON v.chunk_id=c.id "
+                "WHERE d.status='indexed' AND u.status='reviewed' AND "
+                "((d.mime_type='application/pdf' AND u.page_number>0) OR d.mime_type LIKE 'image/%') "
+                "GROUP BY d.id, COALESCE(u.page_number, 0) "
+                "HAVING SUM(CASE WHEN v.model=? AND v.embedding_dim=? THEN 1 ELSE 0 END) != 1 LIMIT 1",
+                (self.visual.model_id, self.visual.dimension),
+            ).fetchone() is not None
+        modes = list(RETRIEVAL_MODES)
+        if self.visual is not None and not visual_pending:
+            modes += ["visual", "multimodal"]
+        if available and callable(getattr(self.models, "plan_retrieval", None)) and (
+            self.settings.answer_model in installed or self.settings.answer_model.removesuffix(":latest") in installed
+        ):
+            modes.append("agentic")
         return {
             "status": "ok",
             "ollama": {"available": available, "models": installed},
@@ -90,7 +169,14 @@ class LabService:
                 "asr": f"faster-whisper:{self.settings.asr_model}" if self.asr.available() else "未導入",
             },
             "documents_count": count,
+            "retrieval_modes": modes,
+            "visual_retrieval": self._visual_status(visual_pending),
         }
+
+    def _visual_status(self, pending: bool) -> str:
+        if self.visual is not None:
+            return "needs_reindex" if pending else "ready"
+        return "setup_failed" if self.visual_setup_failed else "disabled"
 
     def _document_row(self, connection: sqlite3.Connection, document_id: str) -> sqlite3.Row:
         row = connection.execute("SELECT * FROM documents WHERE id=?", (document_id,)).fetchone()
@@ -404,7 +490,10 @@ class LabService:
             starting_status = row["status"]
             revision = row["updated_at"]
             units = [dict(unit) for unit in connection.execute("SELECT * FROM extracted_units WHERE document_id=? ORDER BY created_at, id", (document_id,))]
+            mime_type, stored_name = row["mime_type"], row["stored_name"]
         staged: list[tuple[str, str, int, str, list[float]]] = []
+        staged_visual: list[tuple[str, str, int, str]] = []
+        visual_failed = False
         with self._model_lock:
             for unit in units:
                 content = unit["corrected_text"] if unit["corrected_text"] is not None else unit["extracted_text"]
@@ -413,6 +502,24 @@ class LabService:
                         raise ExtractionError("抽出結果が長すぎます。分割して登録してください")
                     vector = self.models.embed(piece)
                     staged.append((_uuid(), unit["id"], ordinal, piece, vector))
+            if self.visual is not None and (mime_type == "application/pdf" or mime_type.startswith("image/")):
+                page_by_unit = {unit["id"]: unit["page_number"] or 0 for unit in units}
+                seen: set[int] = set()
+                try:
+                    for chunk_id, unit_id, *_ in staged:
+                        page = page_by_unit[unit_id]
+                        if page in seen or (mime_type == "application/pdf" and page == 0):
+                            continue
+                        with read_visual_page(self._stored_path(stored_name), mime_type, page) as image:
+                            vector = self.visual.encode_image(image)
+                        if len(vector) != self.visual.dimension or not any(vector) or not all(math.isfinite(x) for x in vector):
+                            raise ValueError("invalid visual embedding")
+                        staged_visual.append((chunk_id, self.visual.model_id, self.visual.dimension, json.dumps(vector)))
+                        seen.add(page)
+                except Exception:  # noqa: BLE001 - optional visual runtime must not invalidate approved text
+                    # Commit the existing text workflow, never a partial visual index.
+                    visual_failed = True
+                    staged_visual.clear()
         if not staged:
             raise ExtractionError("登録できる確認済みテキストがありません")
         now, index_version = utc_now(), _uuid()
@@ -428,8 +535,26 @@ class LabService:
                     "embedding_model,embedding_dim,index_version,ordinal,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                     (chunk_id, document_id, unit_id, content, content, json.dumps(vector), self.settings.embedding_model, len(vector), index_version, ordinal, now),
                 )
+            connection.executemany(
+                "INSERT INTO visual_pages(chunk_id,model,embedding_dim,embedding_json) VALUES(?,?,?,?)", staged_visual,
+            )
             connection.execute("UPDATE extracted_units SET status='reviewed', updated_at=? WHERE document_id=?", (now, document_id))
-            connection.execute("UPDATE documents SET status='indexed', error=NULL, updated_at=? WHERE id=?", (now, document_id))
+            warning = "視覚索引を作成できませんでした。設定を確認してこの資料を再索引してください。" if visual_failed else None
+            connection.execute("UPDATE documents SET status='indexed', error=?, updated_at=? WHERE id=?", (warning, now, document_id))
+        if staged_visual and self.visual is not None:
+            try:
+                with self._model_lock:
+                    proxies = [self._visual_proxy(item) for item in self._current_chunks()
+                               if item["visual_model"] == self.visual.model_id and item["visual_dim"] == self.visual.dimension]
+                    self._local_vector_index().reconcile(proxies, self.visual.model_id, self.visual.dimension, space="visual")
+            except Exception:  # noqa: BLE001 - derived cache only; text approval already committed
+                # Text and cached visual vectors are already committed. Search
+                # retries the derived index, and must not return partial hits.
+                with self.db.connect() as connection:
+                    connection.execute(
+                        "UPDATE documents SET error=? WHERE id=? AND updated_at=?",
+                        ("視覚索引の保存に失敗しました。視覚検索時に再試行します。", document_id, now),
+                    )
         self._update_job(job_id, "completed", 1.0)
 
     def delete(self, document_id: str) -> None:
@@ -487,20 +612,144 @@ class LabService:
                     return False
         return True
 
-    def ask(self, question: str) -> dict[str, Any]:
+    def _current_chunks(self) -> list[dict[str, Any]]:
+        with self.db.connect() as connection:
+            return [dict(row) for row in connection.execute(
+                "SELECT c.*, d.name AS document_name, d.version, d.mime_type, u.kind, u.page_number, u.start_sec, u.end_sec, "
+                "v.model AS visual_model, v.embedding_dim AS visual_dim, v.embedding_json AS visual_embedding "
+                "FROM chunks c JOIN documents d ON c.document_id=d.id "
+                "JOIN extracted_units u ON c.unit_id=u.id LEFT JOIN visual_pages v ON v.chunk_id=c.id "
+                "WHERE d.status='indexed' AND u.status='reviewed' "
+                "ORDER BY d.created_at, d.id, u.page_number, u.start_sec, c.ordinal, c.id"
+            )]
+
+    @staticmethod
+    def _visual_proxy(row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            **row, "embedding_json": row["visual_embedding"], "embedding_model": row["visual_model"],
+            "embedding_dim": row["visual_dim"],
+        }
+
+    def _matches_visual_model(self, row: dict[str, Any]) -> bool:
+        return self.visual is not None and row["visual_model"] == self.visual.model_id and row["visual_dim"] == self.visual.dimension
+
+    def _rank_visual(self, question: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if self.visual is None:
+            raise ModelError("視覚検索モデルが未設定、または読み込めません")
+        pages = visual_pages(rows)
+        if not pages:
+            if (self.settings.data_dir / "qdrant").exists():
+                try:
+                    self._local_vector_index().clear_when_empty(space="visual")
+                except Exception as exc:
+                    raise ModelError("ローカルQdrantの視覚索引を整理できません") from exc
+            return []
+        proxies = []
+        for group in pages.values():
+            saved = [row for row in group if self._matches_visual_model(row)]
+            if len(saved) != 1:
+                raise ModelError("現行モデルの視覚索引がない画像・PDFがあります。対象資料を再索引してください")
+            row = saved[0]
+            group.remove(row)
+            group.insert(0, row)
+            proxies.append(self._visual_proxy(row))
+        try:
+            vector = self.visual.encode_text(question)
+            if len(vector) != self.visual.dimension:
+                raise ValueError("incompatible visual query dimension")
+            hits = self._local_vector_index().query(vector, proxies, self.visual.model_id, limit=len(proxies), space="visual")
+        except Exception as exc:
+            raise ModelError("ローカル視覚モデルまたはQdrantの検索に失敗しました") from exc
+        return visual_rank(question, pages, hits)
+
+    def _rank(
+        self, question: str, mode: str, rows: list[dict[str, Any]], dimension: int, timeout: float | None = None,
+    ) -> list[dict[str, Any]] | None:
+        if mode in {"visual", "multimodal"}:
+            started = time.monotonic()
+            visual = self._rank_visual(question, rows)
+            if mode == "visual":
+                return visual
+            remaining = None if timeout is None else timeout - (time.monotonic() - started)
+            if remaining is not None and remaining <= 0:
+                raise TimeoutError("visual search reached the remaining budget")
+            text = self._rank(question, "hybrid", rows, dimension, remaining)
+            return None if text is None else fuse_pages(text, visual)
+        if mode == "bm25":
+            return rank_text_modes(question, rows, "bm25")
+        bounded = getattr(self.models, "embed_bounded", None)
+        vector = bounded(question, timeout) if timeout is not None and callable(bounded) else self.models.embed(question)
+        if not isinstance(vector, list) or len(vector) != dimension or any(
+            not isinstance(value, (int, float)) or not math.isfinite(value) for value in vector
+        ):
+            return None
+        if mode == "legacy":
+            return rank_chunks(question, vector, rows)
+        try:
+            dense_hits = self._local_vector_index().query(vector, rows, self.settings.embedding_model, limit=len(rows))
+        except Exception as exc:
+            raise ModelError("ローカルQdrantの照合・検索に失敗しました。従来方式またはBM25を選べます") from exc
+        return rank_text_modes(question, rows, mode, dense_hits)
+
+    def _visual_assist(self, question: str, ranked: list[dict[str, Any]], rows: list[dict[str, Any]]) -> str:
+        """A local VLM may select an approved excerpt, never supply new facts."""
+        for index, row in enumerate(ranked):
+            if row.get("retrieval_origin") != "visual":
+                continue
+            choices = next((group for group in visual_pages(rows).values() if any(item["id"] == row["id"] for item in group)), [])
+            choices = [
+                choice for choice in choices if choice["unit_id"] == row["unit_id"]
+                and (choice["id"] == row["id"] or all(item["id"] != choice["id"] for item in ranked))
+            ]
+            if len(choices) < 2:
+                continue
+            # Do not replace evidence for a question containing an exact record ID.
+            if any(re.search(r"[a-z].*\d", token) for token in terms(question)):
+                continue
+            try:
+                path, mime, _ = self.original_path(row["document_id"])
+                with read_visual_page(path, mime, row["page_number"] or 0) as image, BytesIO() as output:
+                    image.save(output, format="PNG")
+                    draft = self.models.inspect_image(output.getvalue())
+            except (ModelError, ValueError, OSError):
+                return "assist_unavailable"
+            observation = terms(draft)
+            query = terms(question)
+            picked = max(choices, key=lambda item: (
+                lexical_score(query, terms(item["search_text"])),
+                lexical_score(observation, terms(item["search_text"])),
+            ))
+            ranked[index] = {**row, **picked}
+            return "approved_excerpt_selected"
+        return "no_eligible_excerpt"
+
+    def ask(self, question: str, retrieval_mode: str = DEFAULT_RETRIEVAL_MODE) -> dict[str, Any]:
         cleaned = question.strip()
         if not cleaned or len(cleaned) > 1500:
             raise ExtractionError("質問は1〜1500文字で入力してください")
-        with self.db.connect() as connection:
-            rows = [dict(row) for row in connection.execute(
-                "SELECT c.*, d.name AS document_name, d.version, d.mime_type, u.kind, u.page_number, u.start_sec, u.end_sec "
-                "FROM chunks c JOIN documents d ON c.document_id=d.id "
-                "JOIN extracted_units u ON c.unit_id=u.id WHERE d.status='indexed' AND u.status='reviewed' "
-                "ORDER BY d.created_at, d.id, u.page_number, u.start_sec, c.ordinal, c.id"
-            )]
+        if retrieval_mode not in (*RETRIEVAL_MODES, "visual", "multimodal", "agentic"):
+            raise ExtractionError("検索方法が不正です")
+        if retrieval_mode in {"visual", "multimodal"} and self.visual is None:
+            raise ModelError("視覚検索モデルが未設定、または読み込めません")
+        deadline = time.monotonic() + 80.0 if retrieval_mode == "agentic" else None
+        trace: list[dict[str, Any]] = []
+
+        def report(result: dict[str, Any]) -> dict[str, Any]:
+            return {**result, "retrieval_trace": trace} if trace else result
+
+        rows = self._current_chunks()
         held = {"status": "held", "answer": "登録資料からは確認できません。", "sources": []}
         incompatible = {"status": "held", "answer": "検索用のモデルまたは索引が変わりました。資料を再登録してください。", "sources": []}
         if not rows:
+            if retrieval_mode in {"dense", "hybrid", "visual", "multimodal"} and (self.settings.data_dir / "qdrant").exists():
+                try:
+                    with self._model_lock:
+                        if retrieval_mode != "visual":
+                            self._local_vector_index().clear_when_empty()
+                        if retrieval_mode in {"visual", "multimodal"}:
+                            self._local_vector_index().clear_when_empty(space="visual")
+                except Exception as exc:
+                    raise ModelError("ローカルQdrantの空索引を整理できません。Legacy検索は引き続き利用できます") from exc
             return held
         dimensions: set[int] = set()
         for row in rows:
@@ -517,43 +766,102 @@ class LabService:
             dimensions.add(len(vector))
         if len(dimensions) != 1:
             return incompatible
-        with self._model_lock:
-            query_vector = self.models.embed(cleaned)
-            if not isinstance(query_vector, list) or len(query_vector) not in dimensions or any(
-                not isinstance(value, (int, float)) or not math.isfinite(value) for value in query_vector
-            ):
-                return incompatible
-            ranked = rank_chunks(cleaned, query_vector, rows)
+        dimension = next(iter(dimensions))
+        acquired = self._model_lock.acquire(timeout=max(0.0, deadline - time.monotonic()) if deadline else -1)
+        if not acquired:
+            return report({**held, "answer": "ローカルモデルの待ち時間が上限に達しました。"})
+        try:
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return report(held)
+                visual_ready = self.visual is not None and all(
+                    sum(self._matches_visual_model(row) for row in group) == 1 for group in visual_pages(rows).values()
+                )
+                modes = ("bm25", "hybrid", "visual", "multimodal") if visual_ready else ("bm25", "hybrid")
+                plan = getattr(self.models, "plan_retrieval", None)
+
+                def search(q: str, mode: str, timeout: float) -> list[dict[str, Any]]:
+                    hits = self._rank(q, mode, rows, dimension, timeout) or []
+                    return hits if self._cited_chunks_are_current(hits) else []
+
+                agent = run_agentic(
+                    cleaned, search,
+                    plan if callable(plan) else None, modes=modes, budget_seconds=min(55.0, remaining * 0.7),
+                    stop_early=lambda hits: bool(clarification_candidates(cleaned, hits)),
+                )
+                ranked = agent.ranked
+                trace.extend({
+                    "action": step["stage"], "mode": step.get("mode"), "candidate_count": step.get("hit_count"),
+                    "elapsed_ms": step["elapsed_ms"], "reason": step["status"],
+                    "rewritten": step.get("rewritten", False), "fallback": step.get("fallback", False),
+                } for step in agent.trace)
+                trace.append({"action": "stop", "reason": agent.stop_reason})
+            else:
+                ranked = self._rank(cleaned, retrieval_mode, rows, dimension)
+                if ranked is None:
+                    return incompatible
             if not ranked:
-                return held
+                return report(held)
             candidates = clarification_candidates(cleaned, ranked)
             if candidates:
                 if not self._cited_chunks_are_current(candidates):
-                    return held
-                return {
+                    return report(held)
+                return report({
                     "status": "needs_clarification",
                     "answer": "該当しそうな資料が複数あります。資料名や識別番号を指定して質問してください。",
                     "sources": [_source_card(row, row["citation_text"][:3000]) for row in candidates],
-                }
+                })
+            if not self._cited_chunks_are_current(ranked):
+                return report(held)
+            if self.settings.visual_assist and retrieval_mode in {"visual", "multimodal"}:
+                trace.append({"action": "visual_assist", "reason": self._visual_assist(cleaned, ranked, rows)})
+                if not self._cited_chunks_are_current(ranked):
+                    return report(held)
             evidence = [
                 {"id": f"S{index}", "name": item["document_name"], "kind": item["kind"], "text": item["citation_text"][:3000]}
                 for index, item in enumerate(ranked, 1)
             ]
-            result = self.models.answer(cleaned, evidence)
+            if deadline is None:
+                result = self.models.answer(cleaned, evidence)
+            else:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return report(held)
+                started = time.monotonic()
+                bounded = getattr(self.models, "answer_bounded", None)
+                try:
+                    result = bounded(cleaned, evidence, remaining) if callable(bounded) else self.models.answer(cleaned, evidence)
+                except (ModelError, TimeoutError):
+                    trace.append({"action": "answer", "reason": "model_unavailable", "elapsed_ms": round((time.monotonic() - started) * 1000)})
+                    return report(held)
+                trace.append({"action": "answer", "elapsed_ms": round((time.monotonic() - started) * 1000)})
+                if time.monotonic() >= deadline:
+                    return report(held)
+        finally:
+            self._model_lock.release()
         answer_value = result.get("answer", "")
         answer = answer_value.strip() if isinstance(answer_value, str) else ""
         selected = result.get("source_ids", [])
         allowed = {item["id"]: ranked[index] for index, item in enumerate(evidence)}
         if not answer or not isinstance(selected, list) or not selected or not all(isinstance(item, str) and item in allowed for item in selected):
-            return held
+            return report(held)
         unique_ids = list(dict.fromkeys(selected))
         cited_text = "\n".join(evidence[int(item[1:]) - 1]["text"] for item in unique_ids)
-        if any(number not in cited_text for number in re.findall(r"\d+(?:\.\d+)?", answer)):
-            return held
+        if not _numeric_tokens(answer).issubset(_numeric_tokens(cited_text)):
+            return report(held)
+        if _COLOR_REQUEST.search(cleaned):
+            # A page match is not an observation. Check only the selected
+            # approved excerpts, not the pixels or uncited candidate text.
+            colors = _color_tokens(answer)
+            if not colors or not colors.issubset(_color_tokens(cited_text)):
+                return report(held)
         sources = []
         for source_id in unique_ids:
             row = allowed[source_id]
             sources.append(_source_card(row, evidence[int(source_id[1:]) - 1]["text"]))
-        if not self._cited_chunks_are_current([allowed[source_id] for source_id in unique_ids]):
-            return held
-        return {"status": "answered", "answer": answer, "sources": sources}
+        # Every excerpt can influence generation, even if the model cites
+        # another source. Invalidate the draft if any input became stale.
+        if not self._cited_chunks_are_current(ranked):
+            return report(held)
+        return report({"status": "answered", "answer": answer, "sources": sources})

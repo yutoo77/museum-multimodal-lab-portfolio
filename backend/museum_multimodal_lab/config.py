@@ -5,11 +5,16 @@ from __future__ import annotations
 
 import ipaddress
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def cloud_model_name(name: str) -> bool:
+    return bool(re.search(r"(?:^|[:-])cloud(?=[:-]|$)", name, re.IGNORECASE))
 
 
 def validate_ollama_url(value: str) -> str:
@@ -41,19 +46,24 @@ class Settings:
     max_audio_seconds: int = 120
     max_image_pixels: int = 20_000_000
     max_vlm_pdf_pages: int = 3
+    visual_model_dir: Path | None = None
+    visual_assist: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "data_dir", Path(self.data_dir).resolve())
         object.__setattr__(self, "ollama_url", validate_ollama_url(self.ollama_url))
+        if self.visual_model_dir is not None:
+            object.__setattr__(self, "visual_model_dir", Path(self.visual_model_dir).resolve())
         if not 1 <= self.frontend_port <= 65535:
             raise ValueError("画面のポート番号は1〜65535で指定してください")
         for name in ("answer_model", "embedding_model", "vision_model"):
             value = getattr(self, name)
-            if not value or "/" in value or "\\" in value or "@" in value or value.startswith("http"):
+            if not value or "/" in value or "\\" in value or "@" in value or value.startswith("http") or cloud_model_name(value):
                 raise ValueError(f"無効なローカルモデル名: {name}")
 
     @classmethod
     def from_env(cls) -> Settings:
+        visual_dir = os.getenv("MML_VISUAL_MODEL_DIR")
         return cls(
             data_dir=Path(os.getenv("MML_DATA_DIR", str(PROJECT_ROOT / "data"))),
             ollama_url=os.getenv("MML_OLLAMA_URL", "http://127.0.0.1:11436"),
@@ -62,4 +72,6 @@ class Settings:
             embedding_model=os.getenv("MML_EMBEDDING_MODEL", "embeddinggemma:latest"),
             vision_model=os.getenv("MML_VISION_MODEL", "qwen3.5:2b"),
             asr_model=os.getenv("MML_ASR_MODEL", "tiny"),
+            visual_model_dir=Path(visual_dir) if visual_dir else None,
+            visual_assist=os.getenv("MML_VISUAL_ASSIST") == "1",
         )
