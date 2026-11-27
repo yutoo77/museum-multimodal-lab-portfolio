@@ -146,3 +146,26 @@ def test_local_model_malformed_outputs_are_not_indexed(settings: Settings) -> No
             provider.answer("確認", [{"id": "S1", "name": "架空資料", "kind": "pdf_text", "text": "確認"}])
     finally:
         provider.client.close()
+
+
+def test_loopback_model_listing_cannot_enable_remote_inference(settings: Settings) -> None:
+    from dataclasses import replace
+
+    with pytest.raises(ValueError, match="ローカルモデル名"):
+        replace(settings, answer_model="qwen3:4b-cloud")
+    received = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        received.append(request.url.path)
+        return httpx.Response(200, json={"models": [{"name": settings.answer_model, "remote_host": "remote.invalid"}]})
+
+    provider = OllamaProvider(settings)
+    provider.client.close()
+    provider.client = httpx.Client(base_url=settings.ollama_url, transport=httpx.MockTransport(respond), trust_env=False)
+    try:
+        assert provider.models() == []
+        with pytest.raises(ModelError, match="ローカルモデル"):
+            provider.plan_retrieval("fixture", 2)
+        assert received == ["/api/tags", "/api/tags"]
+    finally:
+        provider.client.close()

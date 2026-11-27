@@ -3,8 +3,8 @@
 
 import { forwardRef, useCallback, useEffect, useId, useRef, useState } from "react";
 import type { ButtonHTMLAttributes, PointerEvent as ReactPointerEvent } from "react";
-import { api } from "./api";
-import type { Answer, ExtractedUnit, Health, Job, MuseumDocument, Page, Source, UnitKind } from "./types";
+import { api, DEFAULT_RETRIEVAL_MODE } from "./api";
+import type { Answer, ExtractedUnit, Health, Job, MuseumDocument, Page, RetrievalMode, Source, UnitKind } from "./types";
 
 const nav: { id: Page; label: string }[] = [
   { id: "import", label: "資料を取り込む" },
@@ -44,6 +44,22 @@ const kindLabels: Record<UnitKind, string> = {
   table: "表の構造",
   image_interpretation: "画像のAI解釈",
   audio_transcript: "音声認識",
+};
+
+const defaultRetrievalModes: RetrievalMode[] = [DEFAULT_RETRIEVAL_MODE, "legacy", "dense", "hybrid"];
+const retrievalModeLabels: Record<RetrievalMode, string> = {
+  legacy: "従来方式",
+  bm25: "語句の一致（BM25）",
+  dense: "意味の近さ（Qdrant）",
+  hybrid: "語句＋意味（Hybrid）",
+  visual: "ページ画像から探す",
+  multimodal: "文字＋画像から探す",
+  agentic: "探し方を自動選択",
+};
+
+const availableRetrievalModes = (health: Health | null): RetrievalMode[] => {
+  const advertised = health?.retrieval_modes?.filter((mode) => Object.hasOwn(retrievalModeLabels, mode));
+  return advertised?.length ? [...new Set(advertised)] : defaultRetrievalModes;
 };
 
 const statusLabels: Record<string, string> = {
@@ -312,9 +328,11 @@ function SourceCard({ source, onOpen, candidate = false }: { source: Source; onO
     <article className="source-card">
       <div className="source-card-head">
         <span className="kind-tag">{kindLabels[source.kind] ?? source.kind}</span>
+        {source.retrieval_origin && <span className="retrieval-origin" title={source.retrieval_origin === "visual" ? "ページ画像で資料候補を見つけました" : "文字情報から資料候補を見つけました"}>{source.retrieval_origin === "visual" ? "画像で候補" : "文字で候補"}</span>}
       </div>
       <h3>{source.document_name}</h3>
       <p className="source-location">{locationText(source)}</p>
+      {source.retrieval_origin === "visual" && <p className="source-grounding">回答には確認済みの文字情報を使用</p>}
       <blockquote id={snippetId} className={isLong && !expanded ? "is-clamped" : undefined}>{source.snippet}</blockquote>
       {isLong && <button className="inline-button source-expand" type="button" aria-expanded={expanded} aria-controls={snippetId} onClick={() => setExpanded((current) => !current)}>{expanded ? "閉じる" : "全文を見る"}</button>}
       <div className="source-links">
@@ -346,6 +364,9 @@ export default function App() {
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [reviewConfirmed, setReviewConfirmed] = useState(false);
   const [question, setQuestion] = useState("");
+  const [retrievalMode, setRetrievalMode] = useState<RetrievalMode>(DEFAULT_RETRIEVAL_MODE);
+  const retrievalModes = availableRetrievalModes(health);
+  const selectedRetrievalMode = retrievalModes.includes(retrievalMode) ? retrievalMode : retrievalModes[0];
   const [answer, setAnswer] = useState<Answer | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -474,6 +495,8 @@ export default function App() {
     setBusy("upload");
     try {
       const document = await api.uploadDocument(file);
+      // A revised upload can supersede the source before the new review begins.
+      setAnswer(null);
       await loadDocuments();
       setSelectedId(document.id);
       setFile(null);
@@ -597,7 +620,7 @@ export default function App() {
     setBusy("ask");
     setAnswer(null);
     try {
-      setAnswer(await api.ask(question.trim()));
+      setAnswer(await api.ask(question.trim(), selectedRetrievalMode));
       setScrollTarget({ area: "answer" });
     } catch (err) {
       setError(errorText(err));
@@ -862,6 +885,18 @@ export default function App() {
               <section className={`panel question-panel ${answer ? "has-answer" : ""}`}>
                 <label className="field-label" htmlFor="question">質問</label>
                 <textarea id="question" placeholder="例：展示の体験時間は何分ですか？" value={question} maxLength={1500} disabled={busy === "ask"} onChange={(event) => { setQuestion(event.target.value); setAnswer(null); if (errorContext === "ask") { setError(null); setErrorContext(null); } }} onKeyDown={(event) => { if ((event.ctrlKey || event.metaKey) && event.key === "Enter" && busy === null) void ask(); }} />
+                <details className="retrieval-options">
+                  <summary>検索方法</summary>
+                  <div className="retrieval-options-content">
+                    <label htmlFor="retrieval-mode">資料の探し方</label>
+                    <select id="retrieval-mode" value={selectedRetrievalMode} disabled={busy === "ask"} onChange={(event) => { setRetrievalMode(event.target.value as RetrievalMode); setAnswer(null); if (errorContext === "ask") { setError(null); setErrorContext(null); } }}>
+                      {retrievalModes.map((mode) => <option key={mode} value={mode}>{retrievalModeLabels[mode]}</option>)}
+                    </select>
+                    <p>このアプリで選べる方法を表示します。「意味の近さ」「語句＋意味」にはローカルQdrantが必要です。</p>
+                    {health?.visual_retrieval === "needs_reindex" && <p>画像で探すには、以前に登録した画像やPDFの「検索情報を更新」を実行してください。</p>}
+                    {health?.visual_retrieval === "setup_failed" && <p>画像検索モデルを読み込めませんでした。文字による検索は利用できます。</p>}
+                  </div>
+                </details>
                 <div className="question-footer"><span className="muted-small">Ctrl + Enter でも質問できます</span><button className="button button-primary" type="button" disabled={!question.trim() || busy !== null || Boolean(jobId)} onClick={() => void ask()}>{busy === "ask" ? "調査中…" : "資料から調べる"}</button></div>
                 {busy === "ask" && <p className="question-progress" role="status">登録資料から根拠を探し、回答を作成しています。しばらくお待ちください。</p>}
               </section>
@@ -870,6 +905,16 @@ export default function App() {
                 <div className={`answer-card ${answer.status === "held" ? "held" : answer.status === "needs_clarification" ? "clarification" : ""}`}><p>{answer.answer || (answer.status === "held" ? "登録資料からは確認できません。" : "回答を表示できませんでした。")}</p></div>
                 {answer.status === "held" && <p className="held-guidance">質問を言い換えるか、関連する資料を確認・登録してください。</p>}
                 {answer.sources?.length > 0 && <><div className="section-title source-title"><h2>{answer.status === "needs_clarification" ? "候補資料" : "根拠"}</h2><span className="subtle-label">{answer.sources.length}件</span></div><div className="sources-grid">{answer.sources.map((source) => <SourceCard key={source.chunk_id} source={source} candidate={answer.status === "needs_clarification"} onOpen={() => openSource(source)} />)}</div></>}
+                {Boolean(answer.retrieval_trace?.length) && <details className="retrieval-trace">
+                  <summary>検索の記録</summary>
+                  <ol>{answer.retrieval_trace?.map((entry, index) => <li key={`${entry.action}-${index}`}>
+                    <strong>{entry.action}</strong>
+                    {entry.mode && <span>{Object.hasOwn(retrievalModeLabels, entry.mode) ? retrievalModeLabels[entry.mode as RetrievalMode] : entry.mode}</span>}
+                    {entry.candidate_count != null && <span>候補 {entry.candidate_count}件</span>}
+                    {entry.elapsed_ms != null && <span>{Math.round(entry.elapsed_ms)} ms</span>}
+                    {entry.reason && <p>{entry.reason}</p>}
+                  </li>)}</ol>
+                </details>}
               </section>}
             </>}
           </div>

@@ -49,11 +49,13 @@ try {
     $previousKeepAlive = $env:OLLAMA_KEEP_ALIVE
     $previousMaxModels = $env:OLLAMA_MAX_LOADED_MODELS
     $previousParallel = $env:OLLAMA_NUM_PARALLEL
+    $previousNoCloud = $env:OLLAMA_NO_CLOUD
     try {
         $env:OLLAMA_HOST = '127.0.0.1:11436'
         $env:OLLAMA_KEEP_ALIVE = '0'
         $env:OLLAMA_MAX_LOADED_MODELS = '1'
         $env:OLLAMA_NUM_PARALLEL = '1'
+        $env:OLLAMA_NO_CLOUD = '1'
         $ollama = Start-Process -FilePath $ollamaCommand.Source -ArgumentList @('serve') `
             -WorkingDirectory $projectRoot -WindowStyle Hidden -PassThru `
             -RedirectStandardOutput (Join-Path $logDir 'ollama.out.log') `
@@ -63,6 +65,7 @@ try {
         $env:OLLAMA_KEEP_ALIVE = $previousKeepAlive
         $env:OLLAMA_MAX_LOADED_MODELS = $previousMaxModels
         $env:OLLAMA_NUM_PARALLEL = $previousParallel
+        $env:OLLAMA_NO_CLOUD = $previousNoCloud
     }
     $modelReady = $false
     for ($attempt = 0; $attempt -lt 30; $attempt++) {

@@ -205,9 +205,10 @@ def test_vector_dimension_change_is_held_and_reindex_recovers(service: LabServic
         return original_embed(text) + [0.5]
 
     fake_models.embed = wider_embed  # type: ignore[method-assign]
-    assert "再登録" in service.ask(QUESTION)["answer"]
+    assert "再登録" in service.ask(QUESTION, "legacy")["answer"]
+    assert service.ask(QUESTION)["status"] == "answered"  # The BM25 default does not query with a vector.
     assert wait_for_job(service, service.reindex(doc["id"])["job_id"])["status"] == "completed"
-    assert service.ask(QUESTION)["status"] == "answered"
+    assert service.ask(QUESTION, "legacy")["status"] == "answered"
 
 
 def test_reindex_failure_preserves_previous_index_and_can_retry(service: LabService, fake_models: FakeModels) -> None:
@@ -391,7 +392,8 @@ def test_importing_api_does_not_open_default_data_dir(tmp_path: Path) -> None:
     environment["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "backend")
     result = subprocess.run(
         [sys.executable, "-c", "import museum_multimodal_lab.api"],
-        check=False, capture_output=True, text=True, env=environment, timeout=15,
+        # Functional no-write test: a cold Windows import can be delayed by paging.
+        check=False, capture_output=True, text=True, env=environment, timeout=45,
     )
     assert result.returncode == 0, result.stderr
     assert not data_dir.exists()

@@ -3,6 +3,8 @@
 
 export type Page = "import" | "documents" | "ask";
 
+export type RetrievalMode = "legacy" | "bm25" | "dense" | "hybrid" | "visual" | "multimodal" | "agentic";
+
 export type UnitKind =
   | "pdf_text"
   | "table"
@@ -76,12 +78,22 @@ export interface Source {
   end_sec: number | null;
   snippet: string;
   original_url: string;
+  retrieval_origin?: "visual" | "text";
+}
+
+export interface RetrievalTraceEntry {
+  action: string;
+  mode?: string;
+  candidate_count?: number;
+  elapsed_ms?: number;
+  reason?: string;
 }
 
 export interface Answer {
   status: "answered" | "held" | "needs_clarification";
   answer: string;
   sources: Source[];
+  retrieval_trace?: RetrievalTraceEntry[];
 }
 
 export interface Health {
@@ -95,4 +107,6 @@ export interface Health {
   };
   documents_count: number;
   stale_index_count?: number;
+  retrieval_modes?: RetrievalMode[];
+  visual_retrieval?: "ready" | "needs_reindex" | "setup_failed" | "disabled";
 }

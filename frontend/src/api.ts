@@ -1,7 +1,9 @@
 // Copyright (C) 2026 yutoo77
 // SPDX-License-Identifier: AGPL-3.0-only
 
-import type { Answer, ExtractedUnit, Health, Job, MuseumDocument } from "./types";
+import type { Answer, ExtractedUnit, Health, Job, MuseumDocument, RetrievalMode } from "./types";
+
+export const DEFAULT_RETRIEVAL_MODE: RetrievalMode = "bm25";
 
 const request = async <T>(path: string, init?: RequestInit): Promise<T> => {
   let response: Response;
@@ -56,6 +58,7 @@ export const api = {
     request<{ job_id: string }>(`/api/documents/${encodeURIComponent(id)}/reindex`, { method: "POST" }),
   deleteDocument: (id: string) =>
     request<void>(`/api/documents/${encodeURIComponent(id)}`, { method: "DELETE" }),
-  ask: (question: string) => request<Answer>("/api/ask", { method: "POST", ...json({ question }) }),
+  ask: (question: string, retrievalMode: RetrievalMode = DEFAULT_RETRIEVAL_MODE) =>
+    request<Answer>("/api/ask", { method: "POST", ...json({ question, retrieval_mode: retrievalMode }) }),
   originalUrl: (id: string) => `/api/documents/${encodeURIComponent(id)}/original`,
 };

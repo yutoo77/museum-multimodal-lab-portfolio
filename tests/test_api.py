@@ -17,6 +17,8 @@ def test_mock_api_image_full_flow_and_original(settings: Settings, fake_models: 
         assert health.status_code == 200
         assert health.json()["ollama"]["available"] is True
         assert health.json()["documents_count"] == 0
+        assert health.json()["models"]["answer"] == "qwen3:4b-instruct-2507-q4_K_M"
+        assert health.json()["retrieval_modes"][:4] == ["bm25", "legacy", "dense", "hybrid"]
 
         uploaded = client.post("/api/documents", files={"file": ("mock-image.png", png_bytes(), "image/png")})
         assert uploaded.status_code == 201
@@ -40,10 +42,16 @@ def test_mock_api_image_full_flow_and_original(settings: Settings, fake_models: 
         approve_response = client.post(f"/api/documents/{document_id}/approve")
         assert approve_response.status_code == 202
         assert wait_for_job(app.state.service, approve_response.json()["job_id"])["status"] == "completed"
+        embedding_calls = len(fake_models.embed_calls)
         answer = client.post("/api/ask", json={"question": "GX-418 の観測値は？"})
         assert answer.status_code == 200
         assert answer.json()["status"] == "answered"
         assert answer.json()["sources"][0]["document_id"] == document_id
+        assert len(fake_models.embed_calls) == embedding_calls
+        for mode in ("legacy", "bm25", "dense", "hybrid"):
+            response = client.post("/api/ask", json={"question": "GX-418 の観測値は？", "retrieval_mode": mode})
+            assert response.status_code == 200
+            assert response.json()["status"] == "answered"
         assert client.get(answer.json()["sources"][0]["original_url"]).content == png_bytes()
 
         listed = client.get("/api/documents")
@@ -123,3 +131,4 @@ def test_api_upload_rejects_bad_content_and_untrusted_host(settings: Settings, f
         assert foreign.status_code == 403
         assert client.post("/api/ask", json={"question": "確認"}, headers={"sec-fetch-site": "cross-site"}).status_code == 403
         assert client.post("/api/ask", json={"question": ""}).status_code == 422
+        assert client.post("/api/ask", json={"question": "確認", "retrieval_mode": "unknown_mode"}).status_code == 422
