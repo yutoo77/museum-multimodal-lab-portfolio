@@ -2,6 +2,46 @@
 
 この記録は、**フェイクを使う自動テスト**と**実モデルを使う実機スモーク**を分けます。どちらか一方の成功を、もう一方の成功と読み替えません。新しい改修結果を上に追記し、下部の古い結果は当時の履歴として残します。
 
+## 検索方式を追加した公開版の確認（2026-11-27）
+
+公開ソースから独立したPython 3.11.1環境とNode.js 24.18.0環境を作り、資料は[公開されている生成スクリプト](SETUP.md#架空資料を作って操作する)とUIテスト内のCanvasのみで用意しました。実機操作・再索引はいずれも空の隔離DBから開始し、既存の資料や実験結果には依存していません。
+
+| 区分 | 結果 |
+| --- | --- |
+| Backend | `pytest -q tests` **130件成功**。Ruff、compileall、pip check成功。未承認・旧版の除外、生成中の根拠変更、Qdrantとの照合、視覚とテキストの分離、Agenticの上限・不正な計画などを回帰確認 |
+| Frontend | `npm ci`、型チェック、Lint、Build成功。実Edge＋Fake APIで `state:ui`、`polish:ui`、`expanded:ui`、`preview:ui` 成功 |
+| 既定の実機構成 | `start_demo.ps1`／`stop_demo.ps1` と既定4Bを確認。視覚モデルを無効にし、実React・FastAPI・Ollamaで検索設定を選ばなくてもBM25が使われることをブラウザーとAPIで確認 |
+| 実モデルの取り込みと確認 | 画像・文字PDF・短いWAVを読み取り、テスト操作者による修正・承認後に「19℃」「23分」「午後3時40分」。それぞれ画像・PDF1ページ目・WAV時刻の出典を確認。資料外の質問は保留 |
+| 軽量モデルと任意機能 | 起動前の環境変数で `qwen3:1.7b` に変更し、APIで方式を省略して「23分」、同じPDFの1ページを回答。固定版の実ONNXを追加し、承認済み画像とPDFを再索引すると、実画面で7方式を選べることを確認 |
+| 実機の検索切り替え | 同じ架空画像についてDense・文字Hybrid・Visual・Multimodal・Agenticを各1回実行し、「19℃」と現行の画像出典を確認。Visualの出典は画像検索由来で、回答文は確認済み本文に基づく |
+
+実画面は1280×800と1024×768でも確認しました。WAVの自動文字起こしは固有名詞・時刻に誤りがあり、正しい回答は修正後の本文に基づきます。ブラウザーでWAVをデコードし再生時刻が進むことを確認しましたが、耳による確認はしていません。図表一般の理解、検索方式の優劣、職員の現場評価、完全オフライン運用の実証ではありません。[公開用の画面](portfolio/UI_REVIEW.md#現在の公開版2026-11-27)は実モデルと実ブラウザーで撮影し、API応答を差し替えていません。
+
+### 実ブラウザーで再確認する場合
+
+架空資料生成後、未使用のデータディレクトリを指定してください。以下は起動済みローカルOllamaの11434番を利用する例です。既存のBackendや通常のDBへ接続しないでください。`5175` で空の隔離DBが確認できた場合だけ `flow:ui` が書き込みます。
+
+```powershell
+# 1つ目のPowerShell（リポジトリルート）
+$env:MML_DATA_DIR = Join-Path (Get-Location) 'outputs/isolated-ui/data'
+$env:MML_OLLAMA_URL = 'http://127.0.0.1:11434'
+$env:MML_FRONTEND_PORT = '5175'
+.\.venv\Scripts\python.exe -m uvicorn --app-dir backend museum_multimodal_lab.api:app --host 127.0.0.1 --port 8766
+
+# 2つ目のPowerShell（frontend/）
+$env:MML_FRONTEND_PORT = '5175'
+$env:MML_BACKEND_PORT = '8766'
+npm run dev
+
+# 3つ目のPowerShell（frontend/）
+$env:MML_FRONTEND_URL = 'http://127.0.0.1:5175/'
+$env:MML_E2E_ALLOW_WRITE = '1'
+$env:MML_UI_OUTPUT_DIR = '../outputs/isolated-ui/screenshots'
+npm run flow:ui
+```
+
+この手順は既定4Bを確認します。専用サーバーに揃えて実行する場合は [セットアップ](SETUP.md) の起動方法を使って手動で確認できます。
+
 ## 公開専用スナップショットの再確認（2026-11-14）
 
 元の開発用DB・原本・モデル・Git履歴を変更せず、別フォルダへ取り出した公開候補を新しいPython 3.11仮想環境で検査しました。`python -m pytest -q`は**68 passed**、`ruff check backend tests scripts`、`compileall -q backend tests scripts`、`pip check`は成功。Frontendでは`npm ci`（監査で報告0件）、`npm run typecheck`、`npm run lint`、`npm run build`が成功。README・文書の相対リンク54件、代表PNG 13枚の存在と元画像との同一性を確認しました。
